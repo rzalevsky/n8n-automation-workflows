@@ -95,9 +95,21 @@ against a specific sender, but that belongs in my instance, not in a public repo
 - Polling runs hourly. For higher volume, a push-based trigger beats polling on both latency
   and API quota.
 
+### What it looks like
+
+![Invoice intake workflow on the n8n canvas](01-invoice-intake/screenshot.png)
+
+*The full graph after a successful run — item counts on the connections show the invoice
+travelling from the mailbox through extraction and validation into the sheet, then down the
+routine branch because the amount was below the alert threshold.*
+
+*The output: structured rows appended to the sheet, and the notification that lands the moment
+an invoice arrives. Test data.*
+
 ### Files
 
-- [`01-invoice-intake/workflow.json`](01-invoice-intake/workflow.json)
+- [`01-invoice-intake/workflow.json`](01-invoice-intake/workflow.json) — importable workflow
+- [`01-invoice-intake/screenshot.png`](01-invoice-intake/screenshot.png) — the canvas after a run
 
 ---
 
