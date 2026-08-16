@@ -1,0 +1,291 @@
+{
+  "name": "Source Monitoring — digest instead of feed",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -420,
+        300
+      ],
+      "id": "node-00",
+      "name": "Every morning at 08:00"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Feeds come from the environment, not from the workflow, so this file stays\n// generic and my own reading list stays out of the repository.\nconst raw = $env.RSS_FEEDS ?? '';\nconst urls = raw.split(',').map((s) => s.trim()).filter(Boolean);\n\nif (!urls.length) {\n  throw new Error(\n    'RSS_FEEDS is empty. Set it in .env as a comma-separated list of feed URLs.'\n  );\n}\n\n// One item per feed — the RSS node runs once per input item, so this fans out.\nreturn urls.map((url) => ({ json: { url } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        300
+      ],
+      "id": "node-01",
+      "name": "Source list"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        -20,
+        300
+      ],
+      "id": "node-02",
+      "name": "Read RSS feeds",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Cheap filtering before the expensive step.\n//\n// The time window, deduplication and the hard cap all run on the raw feed output\n// in plain JavaScript. Only what survives is sent to the model, so token cost\n// scales with what is recent and distinct rather than with how much the sources\n// happened to publish that day.\n\nconst WINDOW_HOURS = Number($env.DIGEST_WINDOW_HOURS ?? 24);\nconst MAX_ITEMS = Number($env.DIGEST_MAX_ITEMS ?? 40);\n\nconst cutoff = Date.now() - WINDOW_HOURS * 60 * 60 * 1000;\nconst seen = new Set();\nconst kept = [];\nconst failures = [];\n\nfor (const item of $input.all()) {\n  const a = item.json;\n\n  // The RSS node is set to continue on error, so an unreachable feed arrives\n  // here as an item carrying an error instead of killing the run. Record it —\n  // a digest that is quietly short is worse than one that admits a gap.\n  if (a.error) {\n    failures.push(String(a.error).slice(0, 200));\n    continue;\n  }\n\n  const title = (a.title ?? '').trim();\n  const link = (a.link ?? '').trim();\n  if (!title || !link) continue;\n\n  // Feeds disagree on which date field they populate.\n  const stamp = a.isoDate ?? a.pubDate ?? a.date ?? null;\n  const published = stamp ? new Date(stamp).getTime() : NaN;\n  // An unparseable date is kept rather than dropped: missing a story is worse\n  // than including one that may be a day old.\n  if (!Number.isNaN(published) && published < cutoff) continue;\n\n  // The same story syndicated across two feeds should appear once.\n  const key = title.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();\n  if (seen.has(key)) continue;\n  seen.add(key);\n\n  let source = '';\n  try { source = new URL(link).hostname.replace(/^www\\./, ''); } catch (e) { /* ignore */ }\n\n  kept.push({\n    title,\n    url: link,\n    source,\n    published: stamp,\n    snippet: (a.contentSnippet ?? a.content ?? '').slice(0, 600),\n  });\n}\n\n// Every source failing is a different problem from a quiet news day, and should\n// not be reported as one.\nif (!kept.length && failures.length) {\n  throw new Error(\n    `All ${failures.length} feed(s) failed — check RSS_FEEDS.\\n${failures.join('\\n')}`\n  );\n}\n\nkept.sort((x, y) => new Date(y.published ?? 0) - new Date(x.published ?? 0));\nconst articles = kept.slice(0, MAX_ITEMS);\n\n// A single item carrying the whole batch — one model call instead of N.\nreturn [{\n  json: {\n    count: articles.length,\n    window_hours: WINDOW_HOURS,\n    sources_failed: failures.length,\n    articles,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ],
+      "id": "node-03",
+      "name": "Filter recent & dedupe"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are building a daily reading digest. Return ONLY a valid JSON object. Do not include markdown formatting, code blocks, or conversational text.\n\nTopics of interest:\n{{ $env.DIGEST_TOPICS }}\n\nRules:\n- Drop any article that does not clearly relate to the topics above. Being strict is correct: a short digest that is all relevant beats a long one that is padded.\n- Never invent an article. Every url you return MUST appear verbatim in the input below.\n- Write each summary in two sentences at most, in English, stating what happened rather than what the headline teases.\n\nRequired JSON structure:\n{\n  \"digest\": [\n    {\n      \"title\": \"article title\",\n      \"url\": \"article url, copied exactly from the input\",\n      \"source\": \"source domain\",\n      \"summary\": \"at most two sentences\",\n      \"why_relevant\": \"one short clause tying it to a topic of interest\"\n    }\n  ]\n}\n\nIf nothing is relevant, return {\"digest\": []}.\n\nArticles:\n{{ JSON.stringify($json.articles) }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        380,
+        300
+      ],
+      "id": "node-04",
+      "name": "Summarise & drop noise"
+    },
+    {
+      "parameters": {
+        "model": "qwen2.5-7b-instruct-1m",
+        "options": {
+          "baseURL": "={{ $env.LLM_BASE_URL }}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        380,
+        500
+      ],
+      "id": "node-05",
+      "name": "Local LLM (LM Studio)",
+      "credentials": {
+        "openAiApi": {
+          "id": "62nyfgLJSrBndw23",
+          "name": "lm-studio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same contract as the other two scenarios: strip the fence, then refuse to pass\n// anything downstream that does not hold up.\n\nconst raw = $input.first().json.text ?? '';\nconst cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (err) {\n  throw new Error(`Digest model did not return valid JSON. Raw output:\\n${cleaned.slice(0, 500)}`);\n}\n\nif (!Array.isArray(parsed.digest)) {\n  throw new Error(`Expected a \"digest\" array, got: ${JSON.stringify(parsed).slice(0, 300)}`);\n}\n\n// The check that matters most in a digest: a fabricated link looks exactly like a\n// real one in an email, and the reader only finds out by clicking. So every url\n// the model returns must be one that actually went in.\nconst sourceArticles = $('Filter recent & dedupe').first().json.articles ?? [];\nconst knownUrls = new Set(sourceArticles.map((a) => a.url));\n\nconst entries = [];\nfor (const entry of parsed.digest) {\n  for (const field of ['title', 'url', 'summary']) {\n    if (!entry[field]) {\n      throw new Error(`Digest entry is missing \"${field}\": ${JSON.stringify(entry).slice(0, 200)}`);\n    }\n  }\n  if (!knownUrls.has(entry.url)) {\n    throw new Error(\n      `Digest contains a url that was not in the input — the model invented it:\\n${entry.url}`\n    );\n  }\n  entries.push({\n    title: entry.title,\n    url: entry.url,\n    source: entry.source ?? '',\n    summary: entry.summary,\n    why_relevant: entry.why_relevant ?? '',\n  });\n}\n\nreturn [{\n  json: {\n    count: entries.length,\n    reviewed: sourceArticles.length,\n    window_hours: $('Filter recent & dedupe').first().json.window_hours,\n    sources_failed: $('Filter recent & dedupe').first().json.sources_failed ?? 0,\n    digest: entries,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "id": "node-06",
+      "name": "Parse & validate digest"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "digest-not-empty",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        800,
+        300
+      ],
+      "id": "node-07",
+      "name": "Anything to send?"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.DIGEST_RECIPIENT }}",
+        "subject": "=Daily digest — {{ $json.count }} item{{ $json.count === 1 ? '' : 's' }}",
+        "emailType": "html",
+        "message": "=<h2>Daily digest</h2>\n<p style=\"color:#666;font-size:13px\">{{ $json.count }} of {{ $json.reviewed }} articles from the last {{ $json.window_hours }} hours made the cut.{{ $json.sources_failed ? ' ' + $json.sources_failed + ' source(s) were unreachable.' : '' }}</p>\n{{ $json.digest.map(a => `<div style=\"margin:0 0 22px\"><a href=\"${a.url}\" style=\"font-size:16px;font-weight:600;color:#1a1a1a;text-decoration:none\">${a.title}</a><div style=\"color:#888;font-size:12px;margin:2px 0 6px\">${a.source}</div><div style=\"font-size:14px;line-height:1.5\">${a.summary}</div>${a.why_relevant ? `<div style=\"font-size:12px;color:#777;margin-top:4px\">→ ${a.why_relevant}</div>` : ''}</div>`).join('') }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1020,
+        200
+      ],
+      "id": "node-08",
+      "name": "Email the digest",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "IrgdKk6vs1grTUGC",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1020,
+        400
+      ],
+      "id": "node-09",
+      "name": "Nothing relevant — no email"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every morning at 08:00": {
+      "main": [
+        [
+          {
+            "node": "Source list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Source list": {
+      "main": [
+        [
+          {
+            "node": "Read RSS feeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read RSS feeds": {
+      "main": [
+        [
+          {
+            "node": "Filter recent & dedupe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter recent & dedupe": {
+      "main": [
+        [
+          {
+            "node": "Summarise & drop noise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local LLM (LM Studio)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Summarise & drop noise",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise & drop noise": {
+      "main": [
+        [
+          {
+            "node": "Parse & validate digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & validate digest": {
+      "main": [
+        [
+          {
+            "node": "Anything to send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to send?": {
+      "main": [
+        [
+          {
+            "node": "Email the digest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing relevant — no email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

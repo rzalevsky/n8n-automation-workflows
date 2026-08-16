@@ -56,6 +56,13 @@ services:
       # Read by the webhook's Header Auth credential (scenario 2).
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
 
+      # Scenario 3 — feeds, topics of interest and where the digest is sent.
+      - RSS_FEEDS=${RSS_FEEDS}
+      - DIGEST_TOPICS=${DIGEST_TOPICS}
+      - DIGEST_RECIPIENT=${DIGEST_RECIPIENT}
+      - DIGEST_WINDOW_HOURS=${DIGEST_WINDOW_HOURS:-24}
+      - DIGEST_MAX_ITEMS=${DIGEST_MAX_ITEMS:-40}
+
     volumes:
       # ${HOME} rather than ~ — tilde expansion in compose paths is unreliable.
       - ${HOME}/.n8n:/home/node/.n8n

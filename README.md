@@ -16,7 +16,7 @@ process automation, now applied with low-code tooling and language models.
 |---|---|---|
 | 1 | [Invoice intake — mailbox to structured data](#1-invoice-intake--from-mailbox-to-structured-data) | ✅ Working |
 | 2 | [Request routing — classify, route, answer](#2-request-routing--classify-route-answer) | ✅ Working |
-| 3 | Source monitoring — digest instead of feed | 🚧 In progress |
+| 3 | [Source monitoring — digest instead of feed](#3-source-monitoring--a-digest-instead-of-a-feed) | ✅ Working |
 
 ---
 
@@ -204,6 +204,91 @@ classified by the local model, validated, turned into a Trello card and acknowle
 
 ---
 
+## 3. Source monitoring — a digest instead of a feed
+
+**Problem.** Keeping an eye on a handful of sources means either reading everything or missing
+things, and both are expensive. Feed readers do not solve it — they reproduce the firehose with
+nicer typography, and the backlog becomes another thing to feel guilty about.
+
+**Solution.** A scheduled run pulls the configured feeds, throws out anything outside the time
+window and anything already seen, and hands the survivors to a local LLM in one batch. The model
+drops whatever falls outside the stated topics and summarises the rest in two sentences each. A
+code node verifies the result, and one email goes out.
+
+```
+08:00 daily → feed list from env → read all feeds
+      → filter by window, deduplicate, cap        ← plain JavaScript, no tokens
+      → local LLM (LM Studio): drop noise, summarise   ← one batched call
+      → validate, including every url against the input
+      → anything left ?  → digest email
+                         → no email at all
+```
+
+**Result.** A fixed few minutes of reading instead of an unbounded feed, and the mornings with
+nothing worth reporting cost nothing at all.
+
+### Design decisions worth explaining
+
+**Filtering happens before the model, not inside it.** The time window, deduplication and the
+hard item cap are ordinary JavaScript running over the raw feed output. Only what survives is
+sent for summarisation. Token cost therefore scales with what is recent and distinct rather than
+with how much the sources happened to publish that day — and on a bad news day that is the
+difference between a digest and a bill.
+
+**One batched call, not one per article.** Forty articles go to the model as a single payload
+and come back as one JSON object. Forty separate calls would be simpler to draw on the canvas
+and considerably worse to run: forty times the latency, forty chances of a malformed response,
+and no way for the model to notice that three sources are covering the same story.
+
+**Every returned url is checked against the input.** This is the guard the scenario actually
+needs. A fabricated link is indistinguishable from a real one inside an email, and the reader
+only discovers the problem by clicking. So the validator holds the set of urls that went in, and
+throws if the model returns one that did not. Hallucinating a plausible-looking article url is a
+well-documented failure mode; catching it costs four lines.
+
+**An empty digest sends nothing.** The `if` node exists so that a quiet day produces silence
+rather than a "nothing to report" email. A daily message that is usually empty trains its
+recipient to stop opening it, at which point the whole thing has failed regardless of how well
+the summarisation works.
+
+**One dead feed does not take the digest down.** The RSS node continues on error, so an
+unreachable source arrives at the filter as an item carrying an error rather than aborting the
+run. Those are counted and reported in the digest footer — a silently short digest is the
+failure mode to avoid, because it reads exactly like a quiet news day. If *every* feed fails the
+run stops with an error instead, since that is a broken configuration rather than slow news.
+
+**An article with an unreadable date is kept, not dropped.** Feeds disagree about which date
+field they populate and how they format it. Faced with an ambiguous timestamp the filter errs
+toward inclusion: a slightly stale entry in the digest is a smaller failure than a missed one,
+and that asymmetry should be decided deliberately rather than by whichever branch was easier to
+write.
+
+### What it looks like
+
+![Source monitoring workflow on the n8n canvas](03-monitoring-digest/screenshot.png)
+
+*The item counts trace the whole funnel: 4 feeds in, 83 articles pulled, and a single batched
+item leaving the filter — the deduplication and time window did their work before a token was
+spent. The lower branch is grey because there was something worth sending that morning.*
+
+### Known limitations
+
+- Deduplication matches on normalised titles, so the same story under two different headlines
+  appears twice. Embedding-based clustering would catch it and is the obvious next step.
+- No state between runs. An article republished with a fresh timestamp inside the window can
+  reappear the following day.
+- The window is fixed. A run that fails silently on Monday leaves Monday's articles unseen
+  rather than rolling them into Tuesday.
+- Feeds are fetched with no retry. An unreachable source is reported in the digest footer rather
+  than retried, and a run where *every* feed fails stops loudly instead of sending an empty digest.
+
+### Files
+
+- [`03-monitoring-digest/workflow.json`](03-monitoring-digest/workflow.json) — importable workflow
+- [`03-monitoring-digest/screenshot.png`](03-monitoring-digest/screenshot.png) — the canvas after a run
+
+---
+
 ## Running the stack
 
 ### 1. Configure
@@ -221,7 +306,12 @@ Fill in `.env`:
 | `INVOICE_ALERT_THRESHOLD` | Amount above which the alert branch fires. Defaults to `500` |
 | `LLM_BASE_URL` | Your OpenAI-compatible endpoint — see the networking note below |
 | `TRELLO_LIST_ID` | Trello list that receives routed request cards (scenario 2) |
-| `GENERIC_TIMEZONE` | Defaults to `Europe/Warsaw` |
+| `RSS_FEEDS` | Comma-separated feed URLs to monitor (scenario 3) |
+| `DIGEST_TOPICS` | What counts as relevant — everything else is dropped |
+| `DIGEST_RECIPIENT` | Where the digest is emailed |
+| `DIGEST_WINDOW_HOURS` | How far back to look. Defaults to `24` |
+| `DIGEST_MAX_ITEMS` | Cap on articles sent to the model. Defaults to `40` |
+| `GENERIC_TIMEZONE` | Defaults to `Europe/Warsaw`. Also decides when the digest fires |
 
 `.env` is listed in `.gitignore`. Nothing you put there reaches the repository.
 
@@ -313,7 +403,7 @@ done
 ## Stack
 
 n8n (self-hosted, Docker Compose) · LM Studio — local OpenAI-compatible LLM · Gmail API ·
-Google Sheets API · Telegram Bot API · Trello API
+Google Sheets API · Telegram Bot API · Trello API · RSS
 
 ## Licence
 
