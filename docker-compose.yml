@@ -35,12 +35,26 @@ services:
       # is visible rather than implied.
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
 
-      # Workflow configuration. Compose substitutes these from .env at start-up,
-      # so no environment-specific value ever reaches this file.
+      # Workflow and credential configuration. Compose substitutes these from
+      # .env at start-up, so no environment-specific value reaches this file.
+      #
+      # Note that Compose's .env is only used for ${...} substitution here — it is
+      # NOT injected into the container wholesale. Every variable a workflow or a
+      # credential reads through {{ $env.NAME }} has to be listed below explicitly.
       - GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - INVOICE_ALERT_THRESHOLD=${INVOICE_ALERT_THRESHOLD:-500}
       - LLM_BASE_URL=${LLM_BASE_URL}
+      - TRELLO_LIST_ID=${TRELLO_LIST_ID}
+
+      # Read by the Trello credential in n8n, which resolves its fields from the
+      # environment rather than storing the secrets in n8n's own database.
+      - TRELLO_API_KEY=${TRELLO_API_KEY}
+      - TRELLO_TOKEN=${TRELLO_TOKEN}
+      - TRELLO_SECRET=${TRELLO_SECRET}
+
+      # Read by the webhook's Header Auth credential (scenario 2).
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
 
     volumes:
       # ${HOME} rather than ~ — tilde expansion in compose paths is unreliable.

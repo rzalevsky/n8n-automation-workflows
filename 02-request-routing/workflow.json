@@ -1,0 +1,191 @@
+{
+  "name": "Request Routing — classify, route, answer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "customer-inquiry",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "4e5d3cdf-fb7e-4e56-adff-1779570aeab7",
+      "name": "Webhook: incoming request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        688,
+        656
+      ],
+      "webhookId": "customer-inquiry-123",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Ad7Why2tLPP6py4X",
+          "name": "Webhook header auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an expert customer support AI. Analyze the customer's message and return ONLY a valid JSON object. Do not include markdown formatting or conversational text.\n\nRequired JSON structure:\n{\n  \"category\": \"complaint | question | sales\",\n  \"sentiment\": \"positive | neutral | negative\",\n  \"priority\": \"High | Medium | Low\",\n  \"language\": \"detected language code (e.g. RU, PL, EN)\",\n  \"auto_reply_subject\": \"Write 'We received your message' in detected language\",\n  \"auto_reply\": \"Write a short, polite auto-reply message thanking the customer for their inquiry, WRITTEN IN THEIR ORIGINAL LANGUAGE. If it's a complaint, apologize for the inconvenience.\"\n}\n\nCustomer Name: {{ $json.body.name }}\nCustomer Message: {{ $json.body.message }}"
+      },
+      "id": "6f904f7d-9070-4e5e-b60c-9e7e8b3fd462",
+      "name": "Qwen Classifier",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        912,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "model": "qwen2.5-7b-instruct-1m",
+        "options": {
+          "baseURL": "={{ $env.LLM_BASE_URL }}"
+        }
+      },
+      "id": "57f7b842-21b8-44cb-850c-623c86f764f5",
+      "name": "LM Studio",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        912,
+        864
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "62nyfgLJSrBndw23",
+          "name": "lm-studio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// The classifier is told to return raw JSON, but models occasionally wrap it in\n// a markdown fence or add a sentence of commentary. Strip the fence, then validate.\n//\n// This node guards an outbound email to a customer, so the bar is higher than in\n// scenario 1. A malformed classification must stop the run here rather than send\n// an empty or nonsensical auto-reply: a failed execution is an internal problem,\n// a bad auto-reply is a public one.\n\nconst raw = $input.first().json.text ?? '';\nconst cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();\n\nlet analysis;\ntry {\n  analysis = JSON.parse(cleaned);\n} catch (err) {\n  throw new Error(\n    `Classifier did not return valid JSON. Raw output:\\n${cleaned.slice(0, 500)}`\n  );\n}\n\nconst required = [\n  'category', 'sentiment', 'priority', 'language', 'auto_reply_subject', 'auto_reply',\n];\nconst missing = required.filter((f) => !analysis[f]);\nif (missing.length) {\n  throw new Error(`Classification is missing required fields: ${missing.join(', ')}`);\n}\n\n// The model picks from a closed set. Anything outside it is a hallucinated label\n// that would silently produce mis-routed tickets — cheap to catch, expensive to miss.\nconst allowed = {\n  category: ['complaint', 'question', 'sales'],\n  sentiment: ['positive', 'neutral', 'negative'],\n  priority: ['High', 'Medium', 'Low'],\n};\nfor (const [field, values] of Object.entries(allowed)) {\n  if (!values.includes(analysis[field])) {\n    throw new Error(\n      `Unexpected ${field}: \"${analysis[field]}\". Allowed: ${values.join(', ')}`\n    );\n  }\n}\n\n// The webhook is public, so its payload is untrusted input, not a given.\nconst request = $('Webhook: incoming request').first().json.body ?? {};\nfor (const field of ['name', 'email', 'message']) {\n  if (!request[field]) {\n    throw new Error(`Webhook payload is missing required field: ${field}`);\n  }\n}\n\nreturn [{ json: { request, ai_analysis: analysis } }];\n"
+      },
+      "id": "66dd1528-2b73-492a-926c-1faa47eef8c9",
+      "name": "Parse & validate classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "listId": "={{ $env.TRELLO_LIST_ID }}",
+        "name": "={{ $json.ai_analysis.priority }} · {{ $json.ai_analysis.category }} from {{ $json.request.name }}",
+        "description": "={{ $json.request.message }}\n\n---\nSentiment: {{ $json.ai_analysis.sentiment }}\nLanguage: {{ $json.ai_analysis.language }}\nReply-to: {{ $json.request.email }}",
+        "additionalFields": {}
+      },
+      "id": "cf8f3aca-4f46-4cbb-ac3d-d59d627508db",
+      "name": "Create Trello Task",
+      "type": "n8n-nodes-base.trello",
+      "typeVersion": 1,
+      "position": [
+        1408,
+        656
+      ],
+      "credentials": {
+        "trelloApi": {
+          "id": "eF5yeKZdI3P5zWtd",
+          "name": "Trello account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Parse & validate classification').item.json.request.email }}",
+        "subject": "={{ $('Parse & validate classification').item.json.ai_analysis.auto_reply_subject }}",
+        "message": "={{ $('Parse & validate classification').item.json.ai_analysis.auto_reply }}",
+        "options": {}
+      },
+      "id": "06e81871-b086-4b13-ae02-88473d971810",
+      "name": "Send Auto-Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1648,
+        656
+      ],
+      "webhookId": "57426d1d-2cde-4b8a-a65e-0555b98765a8",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "IrgdKk6vs1grTUGC",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook: incoming request": {
+      "main": [
+        [
+          {
+            "node": "Qwen Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LM Studio": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Qwen Classifier",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qwen Classifier": {
+      "main": [
+        [
+          {
+            "node": "Parse & validate classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & validate classification": {
+      "main": [
+        [
+          {
+            "node": "Create Trello Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Trello Task": {
+      "main": [
+        [
+          {
+            "node": "Send Auto-Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
