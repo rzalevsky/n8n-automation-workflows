@@ -1,0 +1,405 @@
+{
+  "name": "Invoice Intake — mailbox to structured data",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyHour",
+              "minute": 5
+            }
+          ]
+        },
+        "filters": {
+          "q": "has:attachment filename:pdf",
+          "sender": "invoices@example.com"
+        }
+      },
+      "id": "650dc4e6-f13d-4734-aa89-2635d7376dde",
+      "name": "Gmail: new invoice mail",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -320,
+        0
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "IrgdKk6vs1grTUGC",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an expert data extractor. Extract the following fields from the invoice text and return ONLY a valid JSON object. Do not include any markdown formatting, code blocks (like ```json), or conversational text. Return JUST the raw JSON.  Required JSON structure: \n{\n  \"invoice_number\": \"invoice number here\",\n  \"contractor\": \"seller company name here (e.g. ACME Sp. z o.o.)\",\n  \"amount\": 123.45,\n  \"currency\": \"PLN\",\n  \"due_date\": \"YYYY-MM-DD\"\n}\n\nInvoice text: {{ $json.text }}"
+      },
+      "id": "dfb78853-276d-4b25-ac55-69f310c757f2",
+      "name": "Basic LLM Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        208,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": "qwen2.5-7b-instruct-1m",
+        "options": {
+          "baseURL": "={{ $env.LLM_BASE_URL }}"
+        }
+      },
+      "id": "7fbc7cf1-be7d-4c75-9a75-4d48dec1255c",
+      "name": "Local LLM (LM Studio)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        208,
+        208
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "62nyfgLJSrBndw23",
+          "name": "lm-studio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// The model is told to return raw JSON, but models occasionally wrap it in a\n// markdown fence or prepend a sentence. Strip the fence, then validate.\n//\n// Design decision: this node throws instead of returning a partial object.\n// In accounting data a silently wrong value is far more expensive than a\n// visibly failed run — a failed execution gets noticed, a wrong amount does not.\n\nconst raw = $input.first().json.text ?? '';\nconst cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();\n\nlet invoice;\ntry {\n  invoice = JSON.parse(cleaned);\n} catch (err) {\n  throw new Error(\n    `LLM did not return valid JSON. Raw output:\\n${cleaned.slice(0, 500)}`\n  );\n}\n\nconst required = ['invoice_number', 'contractor', 'amount', 'currency', 'due_date'];\nconst missing = required.filter(\n  (f) => invoice[f] === undefined || invoice[f] === null || invoice[f] === ''\n);\nif (missing.length) {\n  throw new Error(`Extracted invoice is missing required fields: ${missing.join(', ')}`);\n}\n\n// Locale guard: a Polish-trained model may return \"123,45\" instead of 123.45.\ninvoice.amount = Number(String(invoice.amount).replace(',', '.'));\nif (Number.isNaN(invoice.amount)) {\n  throw new Error(`Amount is not numeric: ${JSON.stringify($input.first().json.text)}`);\n}\n\nreturn [{ json: invoice }];\n"
+      },
+      "id": "18b1b5ad-7259-45e5-ab3f-395526dfd398",
+      "name": "Parse & validate JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "messageId": "={{ $json.id }}",
+        "simple": false,
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -144,
+        0
+      ],
+      "id": "118d7392-7116-4ac7-93e4-6d1b5d4514fa",
+      "name": "Get a message",
+      "webhookId": "432c4541-c79a-496a-9946-9abbe15670a4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "IrgdKk6vs1grTUGC",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        32,
+        0
+      ],
+      "id": "50bae243-ba6e-4c80-846f-864a99e998eb",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "id"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Invoice Nr": "={{ $json.invoice_number }}",
+            "Contractor": "={{ $json.contractor }}",
+            "Amount": "={{ $json.amount }}",
+            "Currency": "={{ $json.currency }}",
+            "Due Date": "={{ $json.due_date }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Invoice Nr",
+              "displayName": "Invoice Nr",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Contractor",
+              "displayName": "Contractor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Amount",
+              "displayName": "Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        624,
+        0
+      ],
+      "id": "f02897d0-db78-4ece-90b4-b8855521ce38",
+      "name": "Sheets: append invoice row",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "6FZQ2U9VSV6VAniR",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ed11ab5e-1c59-47fb-b1b2-ff726184cfec",
+              "leftValue": "={{ $('Parse & validate JSON').item.json.amount }}",
+              "rightValue": "={{ Number($env.INVOICE_ALERT_THRESHOLD) }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        784,
+        0
+      ],
+      "id": "91c1a487-7f20-4303-85c2-e6637d8e4821",
+      "name": "Above alert threshold?"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=🧾 *Nowa faktura — {{ $('Parse & validate JSON').item.json.contractor }}*\n\nNumer: {{ $('Parse & validate JSON').item.json.invoice_number }}\nKwota: {{ $('Parse & validate JSON').item.json.amount }} {{ $('Parse & validate JSON').item.json.currency }}\nTermin płatności: {{ $('Parse & validate JSON').item.json.due_date }}\n\n⚠️ Kwota przekracza próg {{ $env.INVOICE_ALERT_THRESHOLD }} — wymaga akceptacji przed płatnością.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1008,
+        -96
+      ],
+      "id": "4d412af1-adb2-4870-92e9-18c0283a353a",
+      "name": "Telegram: above-threshold alert",
+      "webhookId": "ff300ab7-0b6d-47ab-b9a5-1feca1cf5c48",
+      "credentials": {
+        "telegramApi": {
+          "id": "HrIfrNmd6FofFkGL",
+          "name": "Telegram account spResolver"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=🧾 *Nowa faktura — {{ $('Parse & validate JSON').item.json.contractor }}*\n\nNumer: {{ $('Parse & validate JSON').item.json.invoice_number }}\nKwota: {{ $('Parse & validate JSON').item.json.amount }} {{ $('Parse & validate JSON').item.json.currency }}\nTermin płatności: {{ $('Parse & validate JSON').item.json.due_date }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1008,
+        96
+      ],
+      "id": "a95eb127-80a9-4643-ac88-b97636da3d0f",
+      "name": "Telegram: routine notification",
+      "webhookId": "1d5fed03-ef62-4f5d-b4b2-3bb42cd4391d",
+      "credentials": {
+        "telegramApi": {
+          "id": "HrIfrNmd6FofFkGL",
+          "name": "Telegram account spResolver"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail: new invoice mail": {
+      "main": [
+        [
+          {
+            "node": "Get a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local LLM (LM Studio)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Parse & validate JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get a message": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & validate JSON": {
+      "main": [
+        [
+          {
+            "node": "Sheets: append invoice row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets: append invoice row": {
+      "main": [
+        [
+          {
+            "node": "Above alert threshold?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Above alert threshold?": {
+      "main": [
+        [
+          {
+            "node": "Telegram: above-threshold alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: routine notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}

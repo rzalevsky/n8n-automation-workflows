@@ -1,0 +1,13 @@
+# Secrets and environment-specific configuration
+.env
+.env.local
+docker-compose.override.yml
+
+# n8n runtime data
+.n8n/
+*.local.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+node_modules/
